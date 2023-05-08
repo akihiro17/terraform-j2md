@@ -3,11 +3,11 @@ package terraform
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/hashicorp/terraform-json/sanitize"
-	"github.com/reproio/terraform-j2md/internal/pretty_print"
 	"io"
 	"strings"
 	"text/template"
+
+	"github.com/hashicorp/terraform-json/sanitize"
 
 	tfjson "github.com/hashicorp/terraform-json"
 	"github.com/pmezard/go-difflib/difflib"
@@ -49,6 +49,64 @@ type PlanData struct {
 }
 type ResourceChangeData struct {
 	ResourceChange *tfjson.ResourceChange
+}
+
+func (p *PlanData) formatJsonString() error {
+	for _, r := range p.ResourceChanges {
+		if err := r.formatJsonString(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *ResourceChangeData) formatJsonString() error {
+	if _, err := r.format(r.ResourceChange.Change.Before); err != nil {
+		return err
+	}
+	if _, err := r.format(r.ResourceChange.Change.After); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *ResourceChangeData) format(v any) (any, error) {
+	switch x := v.(type) {
+	case []any:
+		for i, v := range x {
+			result, err := r.format(v)
+			if err != nil {
+				return nil, err
+			}
+			x[i] = result
+		}
+	case map[string]any:
+		for k, v := range x {
+			result, err := r.format(v)
+			if err != nil {
+				return nil, err
+			}
+			// fmt.Printf("key: %v value: %v\n", k, v)
+			x[k] = result
+		}
+	case string:
+		var j json.RawMessage
+		if !json.Valid([]byte(v.(string))) {
+			return v, nil
+		}
+		if err := json.Unmarshal([]byte(v.(string)), &j); err == nil {
+			a, err := json.MarshalIndent(j, "", "  ")
+			if err != nil {
+				return nil, err
+			}
+			v = string(a)
+			return v, nil
+		}
+	default:
+		return v, nil
+	}
+
+	return v, nil
 }
 
 func (r ResourceChangeData) GetUnifiedDiffString() (string, error) {
@@ -115,12 +173,8 @@ func NewPlanData(input []byte) (*PlanData, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to sanitize plan: %w", err)
 	}
-	prettyPrintedPlan, err := pretty_print.PrettyPrintPlan(sanitizedPlan)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prettify plan: %w", err)
-	}
 	planData := PlanData{}
-	for _, c := range prettyPrintedPlan.ResourceChanges {
+	for _, c := range sanitizedPlan.ResourceChanges {
 		if c.Change.Actions.NoOp() || c.Change.Actions.Read() {
 			continue
 		}
@@ -138,6 +192,9 @@ func NewPlanData(input []byte) (*PlanData, error) {
 		planData.ResourceChanges = append(planData.ResourceChanges, ResourceChangeData{
 			ResourceChange: c,
 		})
+	}
+	if err := planData.formatJsonString(); err != nil {
+		return nil, err
 	}
 	return &planData, nil
 }
